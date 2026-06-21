@@ -45,3 +45,26 @@ uploads/*.webp
 dossiers/*.pdf
 dossiers/*.json
 !dossiers/.gitkeep
+
+# Secrets — never commit
+.env
+
+# SQLite persistence
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Cache
+cache/
+
+# Maigret report scratch
+reports/
+
+# Debug artefacts
+debug_*.html
+debug_*.png
+
+# Test agent artefacts
+test_reports/

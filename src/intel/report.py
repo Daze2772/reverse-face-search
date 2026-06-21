@@ -198,7 +198,7 @@ def _generate_narrative(report: Dict[str, Any]) -> str:
         if orgs:
             parts.append(f"Organizations: {', '.join(o['name'] for o in orgs[:5])}")
         if locs:
-            parts.append(f"Locations: {', '.join(l['name'] for l in locs[:5])}")
+            parts.append(f"Locations: {', '.join(loc['name'] for loc in locs[:5])}")
         parts.append("")
     
     # Cross-platform

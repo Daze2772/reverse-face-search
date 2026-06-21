@@ -1,81 +1,115 @@
-"""Wikipedia knowledge extraction — fetch summaries, infoboxes, bio details."""
+"""Wikipedia knowledge extraction — fetch summaries, infoboxes, bio details.
+
+Now backed by :class:`~src.cache.TTLDiskCache` so repeat lookups are free.
+"""
 
 import logging
+import os
 import re
-from typing import Optional, Dict, Any, List
-from urllib.parse import quote, unquote
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote
+
+import httpx
 
 logger = logging.getLogger("intel.wikipedia")
 
-# Wikipedia API endpoint
 WIKI_API = "https://en.wikipedia.org/w/api.php"
+USER_AGENT = "ReverseFaceSearch/2.0 (research tool; contact@example.com)"
+
+# Filled by :mod:`src.search_manager` at startup so the lookup helpers can
+# share the project-wide cache without import cycles.
+_cache = None
+
+
+def configure_cache(cache) -> None:
+    """Inject a :class:`TTLDiskCache` instance for memoising results."""
+    global _cache
+    _cache = cache
 
 
 async def search_wikipedia(name: str) -> Optional[Dict[str, Any]]:
-    """Search Wikipedia for a person and extract structured data."""
-    import httpx
+    """Search Wikipedia for ``name``; returns structured page data or None."""
+    if not name or len(name) < 3:
+        return None
+
+    if _cache:
+        cached = await _cache.get("wikipedia", name.lower())
+        if cached is not None:
+            logger.debug(f"Wikipedia cache hit: {name}")
+            return cached
 
     try:
-        async with httpx.AsyncClient(timeout=15, headers={
-            "User-Agent": "ReverseFaceSearch/2.0 (research tool; contact@example.com)"
-        }) as client:
-            # Search for the page
+        async with httpx.AsyncClient(timeout=15, headers={"User-Agent": USER_AGENT}) as client:
             params = {
                 "action": "query",
                 "list": "search",
                 "srsearch": name,
                 "format": "json",
-                "srlimit": 3,
+                "srlimit": 5,
             }
             resp = await client.get(WIKI_API, params=params)
             data = resp.json()
-            
+
             search_results = data.get("query", {}).get("search", [])
             if not search_results:
                 logger.info(f"No Wikipedia results for: {name}")
+                if _cache:
+                    await _cache.set("wikipedia", name.lower(), {"found": False})
                 return None
 
-            # Get the best match title — prefer exact name match over related articles
-            best_title = None
-            name_lower = name.lower()
-            name_parts = set(name_lower.split())
-            
-            for result in search_results:
-                title = result["title"]
-                title_lower = title.lower()
-                
-                # Exact match: page title IS the person's name
-                title_parts = set(title_lower.replace("(", "").replace(")", "").split())
-                if title_parts == name_parts or (name_parts.issubset(title_parts) and len(title_parts) <= len(name_parts) + 2):
-                    best_title = title
-                    break
-            
-            if not best_title:
-                # Fallback: title contains all name parts, not a list/characters page
-                for result in search_results:
-                    title = result["title"]
-                    title_lower = title.lower()
-                    if (all(part in title_lower for part in name_parts) 
-                        and "characters of" not in title_lower
-                        and "list of" not in title_lower
-                        and "episode" not in title_lower):
-                        best_title = title
-                        break
-            
-            if not best_title:
-                best_title = search_results[0]["title"]
-            
-            # Fetch page extract + infobox data
-            return await _fetch_page_data(client, best_title)
+            best_title = _pick_best_title(name, search_results)
+            page = await _fetch_page_data(client, best_title)
 
     except Exception as e:
-        logger.error(f"Wikipedia search error for '{name}': {e}")
+        logger.warning(f"Wikipedia search error for '{name}': {e}")
         return None
 
+    if _cache and page:
+        await _cache.set("wikipedia", name.lower(), page)
+    return page
 
-async def _fetch_page_data(client, title: str) -> Dict[str, Any]:
+
+def _pick_best_title(name: str, search_results: List[Dict[str, Any]]) -> str:
+    """Score search results to find the most likely person page.
+
+    Heuristics:
+      * Exact token match on the title wins.
+      * Reject obvious non-person pages ("List of...", "Characters of...",
+        "Episode 1", etc.) unless nothing else matches.
+    """
+    name_lower = name.lower()
+    name_parts = set(name_lower.split())
+
+    def is_list_page(title: str) -> bool:
+        t = title.lower()
+        return any(s in t for s in ("characters of", "list of", "episode",
+                                    "season ", "discography", "filmography"))
+
+    # Pass 1: exact token match
+    for r in search_results:
+        title = r["title"]
+        title_parts = set(re.sub(r'[()]', '', title.lower()).split())
+        if title_parts == name_parts:
+            return title
+
+    # Pass 2: all name parts contained, no list-page disqualifier
+    for r in search_results:
+        title = r["title"]
+        title_lower = title.lower()
+        if all(part in title_lower for part in name_parts) and not is_list_page(title):
+            return title
+
+    # Pass 3: any result without list-page markers
+    for r in search_results:
+        if not is_list_page(r["title"]):
+            return r["title"]
+
+    # Last resort
+    return search_results[0]["title"]
+
+
+async def _fetch_page_data(client: httpx.AsyncClient, title: str) -> Dict[str, Any]:
     """Fetch detailed page data: extract, infobox categories, image, page URL."""
-    
     params = {
         "action": "query",
         "prop": "extracts|pageimages|categories|info",
@@ -89,34 +123,25 @@ async def _fetch_page_data(client, title: str) -> Dict[str, Any]:
         "format": "json",
         "redirects": 1,
     }
-    
     resp = await client.get(WIKI_API, params=params)
     data = resp.json()
-    
     pages = data.get("query", {}).get("pages", {})
     if not pages:
         return {"title": title, "found": False}
-    
-    page = list(pages.values())[0]
-    
-    # Extract structured data
+
+    page = next(iter(pages.values()))
     extract = page.get("extract", "")
     thumbnail = page.get("thumbnail", {}).get("source", "")
     page_url = page.get("fullurl", f"https://en.wikipedia.org/wiki/{quote(title)}")
     page_id = page.get("pageid", "")
-    
-    # Parse categories for classification
-    categories = []
-    for cat in page.get("categories", []):
-        cat_title = cat.get("title", "").replace("Category:", "")
-        categories.append(cat_title)
-    
-    # Infer facts from categories and extract
+
+    categories = [
+        c.get("title", "").replace("Category:", "")
+        for c in page.get("categories", [])
+    ]
     facts = _infer_facts(categories, extract)
-    
-    # Clean extract for summary
     summary = extract.split("\n\n")[0] if extract else ""
-    
+
     result = {
         "title": title,
         "found": True,
@@ -127,18 +152,15 @@ async def _fetch_page_data(client, title: str) -> Dict[str, Any]:
         "categories": categories[:15],
         "facts": facts,
     }
-    
     logger.info(f"Wikipedia: {title} — {len(categories)} categories, {len(facts)} facts")
     return result
 
 
 def _infer_facts(categories: List[str], extract: str) -> Dict[str, Any]:
     """Infer structured facts from categories and extract text."""
-    facts = {}
-    
+    facts: Dict[str, Any] = {}
     category_text = " ".join(categories).lower()
-    
-    # Nationality
+
     nationalities = {
         "american": "American", "british": "British", "canadian": "Canadian",
         "french": "French", "german": "German", "italian": "Italian",
@@ -155,8 +177,7 @@ def _infer_facts(categories: List[str], extract: str) -> Dict[str, Any]:
         if key in category_text:
             facts["nationality"] = label
             break
-    
-    # Profession
+
     professions = {
         "actor": "Actor", "actress": "Actress", "politician": "Politician",
         "musician": "Musician", "singer": "Singer", "writer": "Writer",
@@ -174,31 +195,25 @@ def _infer_facts(categories: List[str], extract: str) -> Dict[str, Any]:
                 facts["profession"] = label
             else:
                 facts["profession"] += f", {label}"
-    
-    # Birth/death years from extract
-    birth_match = re.search(r'(?:born|b\.)\s*(\d{4})', extract, re.IGNORECASE)
-    if birth_match:
-        facts["birth_year"] = birth_match.group(1)
-    
-    death_match = re.search(r'(?:died|d\.)\s*(\d{4})', extract, re.IGNORECASE)
-    if death_match:
-        facts["death_year"] = death_match.group(1)
-    
-    # Known for (first sentence of extract)
+
+    birth = re.search(r'(?:born|b\.)\s*(\d{4})', extract, re.IGNORECASE)
+    if birth:
+        facts["birth_year"] = birth.group(1)
+    death = re.search(r'(?:died|d\.)\s*(\d{4})', extract, re.IGNORECASE)
+    if death:
+        facts["death_year"] = death.group(1)
+
     if extract:
-        first_sentence = extract.split(".")[0][:200]
-        facts["known_for"] = first_sentence.strip()
-    
+        facts["known_for"] = extract.split(".")[0][:200].strip()
     return facts
 
 
 def format_person_summary(wiki_data: Dict[str, Any]) -> str:
-    """Format Wikipedia data into a human-readable person summary."""
-    if not wiki_data.get("found"):
+    """Format Wikipedia data into a human-readable summary."""
+    if not wiki_data or not wiki_data.get("found"):
         return "No Wikipedia entry found."
-    
+
     parts = [f"**{wiki_data['title']}**"]
-    
     facts = wiki_data.get("facts", {})
     if facts.get("nationality"):
         parts.append(f"Nationality: {facts['nationality']}")
@@ -207,15 +222,9 @@ def format_person_summary(wiki_data: Dict[str, Any]) -> str:
     if facts.get("birth_year"):
         birth = facts["birth_year"]
         death = facts.get("death_year", "")
-        if death:
-            parts.append(f"Lived: {birth}–{death}")
-        else:
-            parts.append(f"Born: {birth}")
-    
+        parts.append(f"Lived: {birth}–{death}" if death else f"Born: {birth}")
     if wiki_data.get("summary"):
         parts.append(f"\n{wiki_data['summary']}")
-    
     if wiki_data.get("page_url"):
         parts.append(f"\nWikipedia: {wiki_data['page_url']}")
-    
     return "\n".join(parts)

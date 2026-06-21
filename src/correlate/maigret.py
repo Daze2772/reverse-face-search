@@ -1,10 +1,16 @@
-"""Maigret integration — cross-platform username presence detection."""
+"""Maigret integration — cross-platform username presence detection.
+
+Pipes Maigret's JSON output via ``--json simple`` so we don't have to scrape
+its CLI text format. The legacy text-fallback parser is kept for robustness.
+"""
 
 import asyncio
-import logging
+import glob
 import json
-import subprocess
-from typing import List, Dict, Any, Optional
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("correlate.maigret")
 
@@ -18,74 +24,76 @@ class MaigretRunner:
 
     async def run(self, usernames: List[Dict[str, str]]) -> Dict[str, Any]:
         """Run Maigret for each username and aggregate results."""
-        results = {}
-
-        # Run sequentially to respect rate limits
-        for user_entry in usernames:
-            username = user_entry["username"]
+        results: Dict[str, Any] = {}
+        # Run sequentially — Maigret already hits many sites in parallel per
+        # username, and stacking N more would get us rate-limited everywhere.
+        for entry in usernames:
+            username = entry["username"]
             try:
                 logger.info(f"[maigret] Searching username: {username}")
-                result = await self._search_username(username)
-                results[username] = result
+                results[username] = await self._search_username(username)
             except Exception as e:
                 logger.error(f"[maigret] Error searching {username}: {e}")
                 results[username] = {"error": str(e), "sites": [], "username": username}
-
         return results
 
     async def _search_username(self, username: str) -> Dict[str, Any]:
         """Run Maigret for a single username and parse results."""
-        cmd = self._build_command(username)
+        # Use a per-username scratch dir so concurrent runs don't trample.
+        report_dir = Path("reports") / username
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = self._build_command(username, report_dir)
+        logger.debug(f"[maigret] cmd: {' '.join(cmd)}")
 
         try:
-            # Run maigret as subprocess
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
                 timeout=self.config.maigret.timeout_per_username,
             )
 
-            if process.returncode != 0 and process.returncode is not None:
+            if process.returncode not in (0, None):
                 err_text = stderr.decode("utf-8", errors="replace")
-                logger.warning(f"[maigret] Process returned {process.returncode}: {err_text[:500]}")
+                logger.warning(f"[maigret] exit={process.returncode}: {err_text[:300]}")
 
-            output = stdout.decode("utf-8", errors="replace")
+            sites = self._parse_report_files(report_dir)
+            if not sites:
+                # Fall back to scraping the text output.
+                sites = self._parse_text_output(stdout.decode("utf-8", errors="replace"))
 
-            # Parse Maigret's JSON output (if --json flag used)
-            sites = self._parse_output(output, username)
-
-            # If maigret wrote a JSON report, try to read it
-            report_path = self._find_report(username)
-            if report_path:
-                report_sites = self._parse_report(report_path)
-                if report_sites:
-                    sites = self._merge_sites(sites, report_sites)
-
-            logger.info(f"[maigret] {username}: {len(sites)} platforms found")
+            hits = [s for s in sites if s.get("found")]
+            logger.info(f"[maigret] {username}: {len(hits)} hits / {len(sites)} sites")
 
             return {
                 "username": username,
                 "sites": sites,
                 "total_sites_checked": len(sites),
-                "hits": [s for s in sites if s.get("found", False)],
-                "hit_count": sum(1 for s in sites if s.get("found", False)),
+                "hits": hits,
+                "hit_count": len(hits),
             }
 
         except asyncio.TimeoutError:
-            logger.warning(f"[maigret] Timeout for username: {username}")
+            logger.warning(f"[maigret] timeout for username: {username}")
             return {"username": username, "sites": [], "error": "timeout", "hit_count": 0}
+        except FileNotFoundError:
+            logger.error(f"[maigret] binary not found at: {self.maigret_path}")
+            return {
+                "username": username, "sites": [],
+                "error": "maigret binary missing — pip install maigret",
+                "hit_count": 0,
+            }
         except Exception as e:
-            logger.error(f"[maigret] Exception for {username}: {e}")
+            logger.error(f"[maigret] exception for {username}: {e}")
             return {"username": username, "sites": [], "error": str(e), "hit_count": 0}
 
-    def _build_command(self, username: str) -> List[str]:
-        """Build the Maigret CLI command."""
-        cmd = [
+    def _build_command(self, username: str, report_dir: Path) -> List[str]:
+        """Build the Maigret CLI command. ``--json simple`` makes parsing trivial."""
+        return [
             self.maigret_path,
             username,
             "--no-recursion",
@@ -93,105 +101,62 @@ class MaigretRunner:
             "--no-progressbar",
             "--timeout", "15",
             "--top-sites", str(self.config.maigret.max_sites),
+            "--folderoutput", str(report_dir),
+            "--json", "simple",
         ]
-        return cmd
 
-    def _parse_output(self, output: str, username: str) -> List[Dict]:
-        """Parse Maigret's text/JSON output into structured site results."""
-        sites = []
+    def _parse_report_files(self, report_dir: Path) -> List[Dict[str, Any]]:
+        """Look for the JSON report Maigret writes into the folder."""
+        candidates = sorted(
+            report_dir.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for path in candidates:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as e:
+                logger.debug(f"[maigret] could not parse {path}: {e}")
+                continue
 
-        # Try to find JSON block in output
-        try:
-            # Maigret may output JSON on a single line or multiple
-            json_start = output.find("{")
-            json_end = output.rfind("}")
-            if json_start >= 0 and json_end > json_start:
-                json_str = output[json_start:json_end + 1]
-                data = json.loads(json_str)
-                if isinstance(data, dict):
-                    for site_name, site_data in data.items():
-                        if isinstance(site_data, dict):
-                            sites.append({
-                                "site": site_name,
-                                "url": site_data.get("url_user", ""),
-                                "found": site_data.get("status", {}).get("exists", False) if isinstance(site_data.get("status"), dict) else False,
-                                "response_time": site_data.get("status", {}).get("http_status", 0),
-                            })
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass
+            if not isinstance(data, dict):
+                continue
 
-        # Fallback: parse text output line by line
-        if not sites:
-            for line in output.split("\n"):
-                line = line.strip()
-                if not line:
+            sites: List[Dict[str, Any]] = []
+            for site_name, site_data in data.items():
+                if not isinstance(site_data, dict):
                     continue
-                # Maigret format: [+] or [-] followed by site info
-                if line.startswith("[+]"):
-                    parts = line[3:].strip().split(":", 1)
-                    site_name = parts[0].strip() if parts else "unknown"
-                    url = parts[1].strip() if len(parts) > 1 else ""
-                    sites.append({
-                        "site": site_name,
-                        "url": url,
-                        "found": True,
-                    })
-                elif line.startswith("[-]"):
-                    parts = line[3:].strip().split(":", 1)
-                    site_name = parts[0].strip() if parts else "unknown"
-                    sites.append({
-                        "site": site_name,
-                        "url": "",
-                        "found": False,
-                    })
+                status = site_data.get("status") if isinstance(site_data.get("status"), dict) else {}
+                sites.append({
+                    "site": site_name,
+                    "url": site_data.get("url_user", site_data.get("url", "")),
+                    "found": status.get("exists", False) if status else False,
+                    "response_time": status.get("http_status", 0) if status else 0,
+                })
+            if sites:
+                return sites
+        return []
 
+    @staticmethod
+    def _parse_text_output(output: str) -> List[Dict[str, Any]]:
+        """Fallback: parse Maigret's text output line by line."""
+        sites: List[Dict[str, Any]] = []
+        for line in output.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("[+]"):
+                parts = line[3:].strip().split(":", 1)
+                sites.append({
+                    "site": parts[0].strip() if parts else "unknown",
+                    "url": parts[1].strip() if len(parts) > 1 else "",
+                    "found": True,
+                })
+            elif line.startswith("[-]"):
+                parts = line[3:].strip().split(":", 1)
+                sites.append({
+                    "site": parts[0].strip() if parts else "unknown",
+                    "url": "",
+                    "found": False,
+                })
         return sites
-
-    def _find_report(self, username: str) -> Optional[str]:
-        """Find Maigret's generated JSON report file."""
-        import glob
-        patterns = [
-            f"reports/report_{username}_*.json",
-            f"report_{username}_*.json",
-            f"reports/{username}.json",
-            "reports/*.json",
-        ]
-        for pattern in patterns:
-            matches = sorted(glob.glob(pattern), key=lambda x: __import__("os").path.getmtime(x), reverse=True)
-            if matches:
-                return matches[0]
-        return None
-
-    def _parse_report(self, report_path: str) -> List[Dict]:
-        """Parse a Maigret JSON report file."""
-        try:
-            with open(report_path, "r") as f:
-                data = json.load(f)
-
-            sites = []
-            if isinstance(data, dict):
-                for site_name, site_data in data.items():
-                    if isinstance(site_data, dict):
-                        status = site_data.get("status", {})
-                        sites.append({
-                            "site": site_name,
-                            "url": site_data.get("url_user", site_data.get("url", "")),
-                            "found": status.get("exists", False) if isinstance(status, dict) else False,
-                            "response_time": status.get("http_status", 0) if isinstance(status, dict) else 0,
-                        })
-            return sites
-        except Exception as e:
-            logger.error(f"[maigret] Report parse error: {e}")
-            return []
-
-    def _merge_sites(self, existing: List[Dict], new: List[Dict]) -> List[Dict]:
-        """Merge two site lists, preferring 'found' status."""
-        merged = {s["site"]: s for s in existing}
-        for s in new:
-            site_name = s["site"]
-            if site_name in merged:
-                if s.get("found") and not merged[site_name].get("found"):
-                    merged[site_name] = s
-            else:
-                merged[site_name] = s
-        return list(merged.values())

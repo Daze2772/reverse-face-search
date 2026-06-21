@@ -1,12 +1,29 @@
-"""Configuration loader — reads config.yaml into typed dataclasses."""
+"""Configuration loader.
 
-import yaml
+Reads ``config.yaml`` and overlays environment variables (loaded from ``.env``
+by ``python-dotenv``). Secrets always come from the environment, never from
+the YAML file.
+"""
+
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
+import yaml
+
+# Load .env into os.environ as early as possible.
+try:
+    from dotenv import load_dotenv
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+    load_dotenv(PROJECT_ROOT / ".env", override=False)
+except ImportError:
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+
+
+# ─── Dataclasses ───────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -87,6 +104,40 @@ class ServerConfig:
 
 
 @dataclass
+class FaceConfig:
+    """Optional InsightFace-based embedding verification."""
+    enabled: bool = False
+    similarity_threshold: float = 0.55
+    model_name: str = "buffalo_l"
+    max_images_per_engine: int = 10  # cap embedding work
+
+
+@dataclass
+class StorageConfig:
+    db_path: str = "data/rfs.sqlite"
+    dossier_dir: str = "dossiers"
+    upload_dir: str = "uploads"
+    cache_dir: str = "cache"
+
+
+@dataclass
+class RateLimitConfig:
+    upload: str = "10/minute"
+    search: str = "5/minute"
+
+
+@dataclass
+class IntelConfig:
+    opensanctions_api_key: str = ""
+    cache_ttl_hours: int = 24
+
+
+@dataclass
+class FileHostConfig:
+    imgbb_api_key: str = ""
+
+
+@dataclass
 class AppConfig:
     upload: UploadConfig = field(default_factory=UploadConfig)
     captcha: CaptchaConfig = field(default_factory=CaptchaConfig)
@@ -97,16 +148,49 @@ class AppConfig:
     clustering: ClusteringConfig = field(default_factory=ClusteringConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    face: FaceConfig = field(default_factory=FaceConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
+    ratelimit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    intel: IntelConfig = field(default_factory=IntelConfig)
+    filehost: FileHostConfig = field(default_factory=FileHostConfig)
+    cors_origins: List[str] = field(default_factory=lambda: ["*"])
+
+
+# ─── Helpers ───────────────────────────────────────────────────────────────
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def _env_list(name: str, default: List[str]) -> List[str]:
+    val = os.environ.get(name)
+    if not val:
+        return default
+    return [v.strip() for v in val.split(",") if v.strip()]
+
+
+# ─── Loader ────────────────────────────────────────────────────────────────
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:
-    """Load and parse config.yaml into AppConfig."""
+    """Load and parse config.yaml into AppConfig, then overlay environment vars."""
     path = path or CONFIG_PATH
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
 
     with open(path, "r") as f:
-        raw = yaml.safe_load(f)
+        raw = yaml.safe_load(f) or {}
 
     app = AppConfig()
 
@@ -131,5 +215,53 @@ def load_config(path: Optional[Path] = None) -> AppConfig:
         app.logging = LoggingConfig(**raw["logging"])
     if "server" in raw:
         app.server = ServerConfig(**raw["server"])
+
+    # ─── Environment overrides ─────────────────────────────────────────────
+
+    # Server
+    app.server.host = os.environ.get("RFS_HOST", app.server.host)
+    if os.environ.get("RFS_PORT"):
+        app.server.port = int(os.environ["RFS_PORT"])
+    app.logging.level = os.environ.get("RFS_LOG_LEVEL", app.logging.level)
+
+    # Storage paths
+    app.storage.db_path = os.environ.get("RFS_DB_PATH", app.storage.db_path)
+    app.storage.dossier_dir = os.environ.get("RFS_DOSSIER_DIR", app.storage.dossier_dir)
+    app.storage.upload_dir = os.environ.get("RFS_UPLOAD_DIR", app.upload.temp_dir)
+    app.storage.cache_dir = os.environ.get("RFS_CACHE_DIR", app.storage.cache_dir)
+    app.upload.temp_dir = app.storage.upload_dir  # keep them in sync
+
+    # Engine enable list
+    requested = _env_list("RFS_ENGINES", [])
+    if requested:
+        names = set(requested)
+        app.engines.yandex.enabled = "yandex" in names
+        app.engines.google.enabled = "google" in names
+        app.engines.bing.enabled = "bing" in names
+
+    # Proxy
+    app.proxy.residential_url = os.environ.get("RFS_PROXY_URL", app.proxy.residential_url)
+    if app.proxy.residential_url:
+        app.proxy.enabled = True
+
+    # Secrets — always from env
+    app.captcha.api_key = os.environ.get("TWOCAPTCHA_API_KEY", app.captcha.api_key)
+    app.intel.opensanctions_api_key = os.environ.get(
+        "OPENSANCTIONS_API_KEY", app.intel.opensanctions_api_key
+    )
+    app.filehost.imgbb_api_key = os.environ.get("IMGBB_API_KEY", "")
+
+    # Face embedding
+    app.face.enabled = _env_bool("RFS_FACE_EMBEDDING_ENABLED", app.face.enabled)
+    app.face.similarity_threshold = _env_float(
+        "RFS_FACE_SIMILARITY_THRESHOLD", app.face.similarity_threshold
+    )
+
+    # Rate limits
+    app.ratelimit.upload = os.environ.get("RFS_UPLOAD_RATE", app.ratelimit.upload)
+    app.ratelimit.search = os.environ.get("RFS_SEARCH_RATE", app.ratelimit.search)
+
+    # CORS
+    app.cors_origins = _env_list("RFS_CORS_ORIGINS", app.cors_origins)
 
     return app

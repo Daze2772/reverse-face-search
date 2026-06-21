@@ -1,5 +1,6 @@
-# Reverse Face Search Tool — Configuration
-# All secrets and operational settings in one file.
+# Reverse Face Search v2 — Configuration
+# Secrets (API keys, OpenSanctions, imgbb, 2captcha) belong in `.env`, NOT here.
+# This file only configures behaviour.
 
 # --- Image Upload Settings ---
 upload:
@@ -8,18 +9,18 @@ upload:
   temp_dir: "uploads"
   auto_purge_after_search: true
 
-# --- CAPTCHA Solver ---
+# --- CAPTCHA Solver (secrets via env) ---
 captcha:
-  provider: "2captcha"           # "2captcha" or "anticaptcha"
-  api_key: ""                     # Your API key here
-  site_key_google: ""            # Google reCAPTCHA site key (populate if known)
+  provider: "2captcha"
+  api_key: ""          # → TWOCAPTCHA_API_KEY env var
+  site_key_google: ""
   max_retries: 3
   timeout_seconds: 120
 
-# --- Proxies (optional) ---
+# --- Proxies (optional, override with RFS_PROXY_URL env) ---
 proxy:
   enabled: false
-  residential_url: ""            # e.g., "http://user:pass@proxy.example.com:8080"
+  residential_url: ""
   rotation: "per_session"
 
 # --- Reverse Search Engines ---
@@ -49,9 +50,9 @@ browser:
 
 # --- Maigret ---
 maigret:
-  path: "maigret"                # Command or full path to maigret binary
-  timeout_per_username: 120      # Seconds per username search
-  max_sites: 100                 # Cap sites per username
+  path: "maigret"
+  timeout_per_username: 180
+  max_sites: 250
   async_mode: true
 
 # --- Clustering ---
@@ -68,9 +69,21 @@ clustering:
     pinterest: ["pinterest.com"]
     youtube: ["youtube.com"]
     github: ["github.com"]
-  news_domains: ["news.", "bbc.com", "cnn.com", "reuters.com", "nytimes.com", "wikipedia.org"]
-  forum_domains: ["reddit.com", "quora.com", "stackexchange.com", "stackoverflow.com"]
-  blog_domains: ["medium.com", "substack.com", "wordpress.com", "blogspot.com", "tumblr.com"]
+    threads: ["threads.net"]
+    bluesky: ["bsky.app"]
+    mastodon: ["mastodon.social", "mastodon.online"]
+  news_domains:
+    [
+      "news.", "bbc.com", "cnn.com", "reuters.com", "nytimes.com",
+      "wikipedia.org", "theguardian.com", "washingtonpost.com",
+      "wsj.com", "bloomberg.com", "apnews.com",
+    ]
+  forum_domains:
+    ["reddit.com", "quora.com", "stackexchange.com", "stackoverflow.com",
+     "hackernews", "ycombinator.com", "lobste.rs"]
+  blog_domains:
+    ["medium.com", "substack.com", "wordpress.com", "blogspot.com",
+     "tumblr.com", "dev.to", "hashnode.com"]
 
 # --- Logging ---
 logging:
@@ -78,8 +91,8 @@ logging:
   file: "logs/reverse_face_search.log"
   format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
-# --- Server ---
+# --- Server (override with RFS_HOST / RFS_PORT env) ---
 server:
-  host: "127.0.0.1"
+  host: "0.0.0.0"
   port: 8000
   ws_heartbeat_seconds: 30

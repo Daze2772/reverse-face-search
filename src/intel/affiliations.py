@@ -140,7 +140,6 @@ def extract_affiliations(engine_results: Dict[str, Dict]) -> Dict[str, List[str]
     
     # Extract URLs by domain as implicit organizations
     domains = Counter()
-    import re
     domain_pattern = re.compile(r'https?://(?:www\.)?([^/]+)')
     for match in domain_pattern.finditer(all_text):
         domain = match.group(1).lower()

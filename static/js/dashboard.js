@@ -154,8 +154,12 @@
         } else if (stage === 'clustering') {
             setStageActive('reverse_search', 'done');
             setStageActive('clustering', 'active');
+        } else if (stage === 'name_search') {
+            setStageActive('clustering', 'done');
+            setStageActive('name_search', 'active');
         } else if (stage === 'username_extraction') {
             setStageActive('clustering', 'done');
+            setStageActive('name_search', 'done');
             setStageActive('username_extraction', 'active');
         } else if (stage === 'maigret') {
             setStageActive('username_extraction', 'done');

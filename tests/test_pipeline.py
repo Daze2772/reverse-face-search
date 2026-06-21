@@ -168,13 +168,20 @@ class PipelineTester:
 
         from src.config import load_config
         from src.engines.yandex import YandexEngine
+        from src.engines.filehost import upload_to_public
 
         config = load_config()
         engine = YandexEngine(config)
 
+        # Upload the local test image so the URL-based engine has a public URL
+        image_url = await upload_to_public(self.test_image_path)
+        if not image_url:
+            logger.warning("Phase 2 SKIPPED — file host upload failed")
+            return False
+
         for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
             try:
-                result = await engine.search(self.test_image_path)
+                result = await engine.search(self.test_image_path, image_url=image_url)
                 urls = result.get("urls", [])
                 logger.info(f"Yandex returned {len(urls)} URLs (attempt {attempt})")
 
@@ -218,12 +225,19 @@ class PipelineTester:
         from src.engines.yandex import YandexEngine
         from src.engines.google import GoogleEngine
         from src.engines.bing import BingEngine
+        from src.engines.filehost import upload_to_public
+        from src.engines.pool import BrowserPool
 
         config = load_config()
 
-        async def run_engine(name, engine):
+        image_url = await upload_to_public(self.test_image_path)
+        if not image_url:
+            logger.warning("Phase 3 SKIPPED — file host upload failed")
+            return False
+
+        async def run_engine(name, engine, browser):
             try:
-                result = await engine.search(self.test_image_path)
+                result = await engine.search(self.test_image_path, image_url=image_url, browser=browser)
                 count = len(result.get("urls", []))
                 error = result.get("error")
                 logger.info(f"{name}: {count} URLs" + (f" (error: {error})" if error else ""))
@@ -240,8 +254,9 @@ class PipelineTester:
         if config.engines.bing.enabled:
             engines["bing"] = BingEngine(config)
 
-        tasks = [run_engine(name, eng) for name, eng in engines.items()]
-        all_results = await asyncio.gather(*tasks)
+        async with BrowserPool.session(config) as pool:
+            tasks = [run_engine(name, eng, pool.browser) for name, eng in engines.items()]
+            all_results = await asyncio.gather(*tasks)
 
         working_engines = 0
         for name, count, error in all_results:
