@@ -118,8 +118,7 @@
     // ── WebSocket ──
     function connectWebSocket() {
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        // Both /ws/{id} and /api/ws/{id} are wired up server-side.
-        // We use /api/ws so the same code works behind an /api/* ingress.
+        // Note: /api/ws/... is the ingress-routed alias served by the FastAPI backend.
         ws = new WebSocket(`${protocol}//${location.host}/api/ws/${searchId}`);
 
         ws.onmessage = (event) => {

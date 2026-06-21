@@ -97,10 +97,11 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Mount static files
+    # Mount static files (also exposed via /api/static for ingress routing)
     static_dir = Path(__file__).resolve().parent.parent.parent / "static"
     if static_dir.exists():
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+        app.mount("/api/static", StaticFiles(directory=str(static_dir)), name="api_static")
 
     upload_rate = config.ratelimit.upload
     search_rate = config.ratelimit.search
@@ -213,6 +214,15 @@ def create_app() -> FastAPI:
 
     @app.websocket("/ws/{search_id}")
     async def websocket_progress(websocket: WebSocket, search_id: str):
+        await _handle_ws(websocket, search_id)
+
+    @app.websocket("/api/ws/{search_id}")
+    async def websocket_progress_api(websocket: WebSocket, search_id: str):
+        # Ingress-friendly alias — required when the app sits behind a proxy
+        # that only forwards /api/* upstream.
+        await _handle_ws(websocket, search_id)
+
+    async def _handle_ws(websocket: WebSocket, search_id: str):
         await websocket.accept()
         active_ws_clients.append((websocket, search_id))
         logger.info(f"WebSocket connected for search {search_id}")

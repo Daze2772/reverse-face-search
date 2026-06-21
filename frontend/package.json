@@ -1,0 +1,12 @@
+{
+  "name": "reverse-face-search-frontend",
+  "version": "2.1.0",
+  "private": true,
+  "scripts": {
+    "start": "serve -s public -l tcp://0.0.0.0:3000 --no-clipboard",
+    "build": "echo 'No build step — static HTML'"
+  },
+  "dependencies": {
+    "serve": "^14.2.4"
+  }
+}
