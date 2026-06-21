@@ -1,0 +1,85 @@
+# Reverse Face Search Tool — Configuration
+# All secrets and operational settings in one file.
+
+# --- Image Upload Settings ---
+upload:
+  max_size_mb: 20
+  allowed_types: ["image/jpeg", "image/png", "image/webp"]
+  temp_dir: "uploads"
+  auto_purge_after_search: true
+
+# --- CAPTCHA Solver ---
+captcha:
+  provider: "2captcha"           # "2captcha" or "anticaptcha"
+  api_key: ""                     # Your API key here
+  site_key_google: ""            # Google reCAPTCHA site key (populate if known)
+  max_retries: 3
+  timeout_seconds: 120
+
+# --- Proxies (optional) ---
+proxy:
+  enabled: false
+  residential_url: ""            # e.g., "http://user:pass@proxy.example.com:8080"
+  rotation: "per_session"
+
+# --- Reverse Search Engines ---
+engines:
+  yandex:
+    enabled: true
+    base_url: "https://yandex.com/images/search"
+    timeout_seconds: 60
+  google:
+    enabled: true
+    base_url: "https://lens.google.com"
+    timeout_seconds: 60
+  bing:
+    enabled: true
+    base_url: "https://www.bing.com/images/search?view=detailv2&iss=sbi"
+    timeout_seconds: 60
+
+# --- Browser / Playwright ---
+browser:
+  headless: true
+  pool_size: 3
+  stealth_mode: true
+  user_agent_rotation: true
+  viewport:
+    width: 1920
+    height: 1080
+
+# --- Maigret ---
+maigret:
+  path: "maigret"                # Command or full path to maigret binary
+  timeout_per_username: 120      # Seconds per username search
+  max_sites: 100                 # Cap sites per username
+  async_mode: true
+
+# --- Clustering ---
+clustering:
+  social_domains:
+    instagram: ["instagram.com"]
+    linkedin: ["linkedin.com"]
+    twitter: ["twitter.com", "x.com"]
+    facebook: ["facebook.com", "fb.com"]
+    tiktok: ["tiktok.com"]
+    vsco: ["vsco.co"]
+    snapchat: ["snapchat.com"]
+    reddit: ["reddit.com"]
+    pinterest: ["pinterest.com"]
+    youtube: ["youtube.com"]
+    github: ["github.com"]
+  news_domains: ["news.", "bbc.com", "cnn.com", "reuters.com", "nytimes.com", "wikipedia.org"]
+  forum_domains: ["reddit.com", "quora.com", "stackexchange.com", "stackoverflow.com"]
+  blog_domains: ["medium.com", "substack.com", "wordpress.com", "blogspot.com", "tumblr.com"]
+
+# --- Logging ---
+logging:
+  level: "INFO"
+  file: "logs/reverse_face_search.log"
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+# --- Server ---
+server:
+  host: "127.0.0.1"
+  port: 8000
+  ws_heartbeat_seconds: 30

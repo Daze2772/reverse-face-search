@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+venv/
+.venv/
+
+# Uploads (temp files)
+uploads/*.jpg
+uploads/*.jpeg
+uploads/*.png
+uploads/*.webp
+!uploads/.gitkeep
+
+# Dossiers (generated)
+dossiers/*.json
+!dossiers/.gitkeep
+
+# Logs
+logs/*.log
+!logs/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config secrets (keep template, ignore real)
+# config.yaml  (uncomment if you want to ignore your configured version)
+
+# Test results
+test_results.json
+uploads/*.jpg
+uploads/*.webp
+!uploads/.gitkeep
+dossiers/*.pdf
+dossiers/*.json
+!dossiers/.gitkeep

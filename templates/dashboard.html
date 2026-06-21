@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reverse Face Search v2 — Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <h1>Reverse Face Search <span style="color:var(--accent);font-size:0.7em;vertical-align:super">v2</span></h1>
+        <span class="subtitle">Cross-platform digital footprint correlation + Intelligence Reports</span>
+    </header>
+
+    <main>
+        <!-- Upload Panel -->
+        <section id="upload-panel" class="panel">
+            <h2>Upload Image</h2>
+            <div id="drop-zone" class="drop-zone">
+                <p>Drag &amp; drop an image here, or click to browse</p>
+                <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp" hidden>
+                <span class="upload-limits">JPEG / PNG / WebP — max 20MB</span>
+            </div>
+            <div id="upload-preview" class="hidden">
+                <img id="preview-img" src="" alt="Preview">
+                <div id="upload-info"></div>
+            </div>
+            <button id="search-btn" class="btn primary hidden">Start Search</button>
+            <div id="upload-status" class="status"></div>
+        </section>
+
+        <!-- Progress Panel -->
+        <section id="progress-panel" class="panel hidden">
+            <h2>Search Progress</h2>
+            <div id="progress-stages">
+                <div class="stage" data-stage="upload"><span class="stage-icon">⬆</span><span class="stage-label">Upload</span><span class="stage-status"></span></div>
+                <div class="stage" data-stage="uploading_to_host"><span class="stage-icon">☁</span><span class="stage-label">Hosting Image</span><span class="stage-status"></span></div>
+                <div class="stage" data-stage="reverse_search"><span class="stage-icon">🔍</span><span class="stage-label">Reverse Search</span><span class="stage-status"></span><div id="engine-details" class="engine-details"></div></div>
+                <div class="stage" data-stage="clustering"><span class="stage-icon">📊</span><span class="stage-label">Clustering</span><span class="stage-status"></span></div>
+                <div class="stage" data-stage="username_extraction"><span class="stage-icon">👤</span><span class="stage-label">Username Extraction</span><span class="stage-status"></span></div>
+                <div class="stage" data-stage="maigret"><span class="stage-icon">🌐</span><span class="stage-label">Cross-Platform (Maigret)</span><span class="stage-status"></span></div>
+                <div class="stage" data-stage="intel_report"><span class="stage-icon">🧠</span><span class="stage-label">Intelligence Report</span><span class="stage-status"></span></div>
+                <div class="stage" data-stage="dossier"><span class="stage-icon">📄</span><span class="stage-label">Dossier</span><span class="stage-status"></span></div>
+                <div class="stage" data-stage="completed"><span class="stage-icon">✅</span><span class="stage-label">Complete</span><span class="stage-status"></span></div>
+            </div>
+        </section>
+
+        <!-- Results Panels -->
+        <section id="results-panel" class="panel hidden">
+            <h2>Results</h2>
+
+            <!-- Intel Report (V2) -->
+            <div id="intel-report-section" class="sub-panel hidden">
+                <h3>🧠 Intelligence Report</h3>
+                <div id="intel-subject" style="font-size:1.2em;font-weight:700;margin-bottom:8px"></div>
+                <div id="intel-classification"></div>
+                <div id="intel-wikipedia"></div>
+                <div id="intel-risk"></div>
+                <div id="intel-affiliations"></div>
+                <div id="intel-narrative" class="section-box"></div>
+            </div>
+
+            <!-- Engine Results -->
+            <div id="engine-results" class="sub-panel">
+                <h3>Search Engine Results</h3>
+                <div id="engine-tabs" class="tabs"></div>
+                <div id="engine-content" class="tab-content"></div>
+            </div>
+
+            <!-- Clusters -->
+            <div id="cluster-results" class="sub-panel">
+                <h3>URL Clusters by Domain</h3>
+                <div id="cluster-grid" class="cluster-grid"></div>
+            </div>
+
+            <!-- Usernames -->
+            <div id="username-results" class="sub-panel">
+                <h3>Extracted Usernames</h3>
+                <table id="username-table">
+                    <thead><tr><th>Username</th><th>Platforms</th><th>Name Match</th><th>Source URLs</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+
+            <!-- Maigret Hits -->
+            <div id="maigret-results" class="sub-panel">
+                <h3>Cross-Platform Hits (Maigret)</h3>
+                <div id="maigret-grid"></div>
+            </div>
+        </section>
+
+        <!-- Export -->
+        <section id="export-panel" class="panel hidden">
+            <h2>Export</h2>
+            <button id="export-json-btn" class="btn">Download JSON</button>
+            <button id="export-pdf-btn" class="btn primary">Download PDF Report</button>
+            <button id="new-search-btn" class="btn secondary">New Search</button>
+        </section>
+    </main>
+
+    <footer><span>Reverse Face Search v2.0.0</span></footer>
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
