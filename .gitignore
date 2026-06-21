@@ -68,3 +68,9 @@ debug_*.png
 
 # Test agent artefacts
 test_reports/
+.env.*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials

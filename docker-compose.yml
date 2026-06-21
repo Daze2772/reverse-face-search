@@ -1,5 +1,6 @@
 # ────────────────────────────────────────────────────────────────────────────
-#  Reverse Face Search v2 — docker-compose for local prod-like deployment
+#  Reverse Face Search v2 — docker-compose for production deployment
+#  Includes MinIO (private S3-compatible object store) for image hosting.
 # ────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -7,6 +8,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        WITH_FACE: "true"
     image: reverse-face-search:2.1.0
     container_name: rfs
     restart: unless-stopped
@@ -15,10 +18,19 @@ services:
     environment:
       RFS_HOST: 0.0.0.0
       RFS_PORT: "8000"
+      RFS_ENV: production
+      # Internal MinIO endpoint (container DNS). External engines hit the
+      # signed-proxy URL on the public ingress instead.
+      MINIO_ENDPOINT: minio:9000
+      MINIO_BUCKET: rfs-uploads
+      MINIO_USE_SSL: "false"
     ports:
       - "8000:8000"
+    depends_on:
+      minio:
+        condition: service_healthy
     volumes:
-      - rfs_data:/app/data       # SQLite + cache
+      - rfs_data:/app/data
       - rfs_dossiers:/app/dossiers
       - rfs_uploads:/app/uploads
       - rfs_logs:/app/logs
@@ -30,12 +42,31 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    # Optional resource caps — uncomment for tight prod environments
-    # deploy:
-    #   resources:
-    #     limits:
-    #       memory: 2g
-    #       cpus: "1.5"
+
+  minio:
+    image: minio/minio:latest
+    container_name: rfs-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set in .env}
+    volumes:
+      - minio_data:/data
+    # Only expose to the ``rfs`` service — never publish to the internet.
+    # The signed-proxy endpoint in the app gates all external access.
+    expose:
+      - "9000"
+    ports:
+      # Web console for ops, bound to localhost only. Remove if you don't
+      # need it.
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   rfs_data:
@@ -44,3 +75,4 @@ volumes:
   rfs_logs:
   rfs_cache:
   rfs_reports:
+  minio_data:

@@ -34,6 +34,9 @@ python-dotenv>=1.0.0
 # Image handling
 Pillow>=10.2.0
 
+# Object storage (MinIO / S3-compatible) — optional but enabled by default
+minio>=7.2.0
+
 # Logging / structured output
 structlog>=24.1.0
 
@@ -45,10 +48,10 @@ maigret>=0.4.4
 
 # Optional: Face embedding verification
 # Uncomment if RFS_FACE_EMBEDDING_ENABLED=true
-# insightface>=0.7.3
-# onnxruntime>=1.16.0
-# opencv-python-headless>=4.9.0
-# numpy>=1.26.0
+insightface>=0.7.3
+onnxruntime>=1.16.0
+opencv-python-headless>=4.9.0
+numpy>=1.26.0
 
 # Testing
 pytest>=8.1.0

@@ -19,7 +19,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -28,6 +28,7 @@ from slowapi.util import get_remote_address
 from ..cache import TTLDiskCache
 from ..config import AppConfig, load_config
 from ..search_manager import SearchManager
+from ..storage import get_storage, verify_token
 from ..store import Store
 from .websocket_broadcast import active_ws_clients, broadcast_progress
 
@@ -120,6 +121,44 @@ def create_app() -> FastAPI:
     async def healthcheck():
         return {"status": "ok", "version": "2.1.0"}
 
+    @app.get("/api/img/{token}")
+    @limiter.limit("60/minute")
+    async def serve_signed_image(
+        request: Request,
+        token: str,
+        config: AppConfig = Depends(get_config),
+    ):
+        """Serve an uploaded image via a short-lived HMAC-signed token.
+
+        This is the privacy-preserving alternative to imgbb: the reverse-
+        search engines fetch this URL, but the image bytes never leave our
+        infrastructure. The signed token gates access and self-expires.
+        """
+        result = verify_token(token)
+        if not result:
+            # 404 (not 401) so scanners can't tell the difference between
+            # "expired" and "invalid" via timing or status code alone.
+            raise HTTPException(status_code=404, detail="Not found")
+
+        key, _exp = result
+        storage = get_storage(config.upload.temp_dir)
+        data = storage.read(key)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Not found")
+
+        # Best-guess content type from extension.
+        ext = key.lower().rsplit(".", 1)[-1] if "." in key else ""
+        ct = {
+            "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "png": "image/png", "webp": "image/webp",
+        }.get(ext, "application/octet-stream")
+        # No-cache so a token can't be re-used past expiry via a CDN cache.
+        return Response(
+            content=data,
+            media_type=ct,
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
+
     @app.post("/api/upload")
     @limiter.limit(upload_rate)
     async def upload_image(
@@ -146,9 +185,25 @@ def create_app() -> FastAPI:
 
         search_id = str(uuid.uuid4())
         ext = _get_extension(file.filename, file.content_type)
-        temp_path = Path(config.upload.temp_dir) / f"{search_id}{ext}"
+        key = f"{search_id}{ext}"
+
+        # Write to local disk (always — the pipeline needs a file path for
+        # face embedding and as a fallback for storage backends that don't
+        # support random-access reads).
+        temp_path = Path(config.upload.temp_dir) / key
+        temp_path.parent.mkdir(parents=True, exist_ok=True)
         with open(temp_path, "wb") as f:
             f.write(contents)
+
+        # Mirror into the configured storage backend (no-op for LocalStorage
+        # since both point at the same directory; uploads to MinIO bucket
+        # when MINIO_ENDPOINT is set).
+        try:
+            storage = get_storage(config.upload.temp_dir)
+            if storage.name.startswith("minio"):
+                storage.save(key, contents, content_type=file.content_type)
+        except Exception as e:
+            logger.warning(f"storage mirror failed: {e}")
 
         logger.info(f"Image uploaded: {search_id} ({size_mb:.1f}MB, {file.content_type})")
 
@@ -261,6 +316,8 @@ def create_app() -> FastAPI:
                 "face_embedding": config.face.enabled,
                 "imgbb_configured": bool(os.environ.get("IMGBB_API_KEY")),
                 "opensanctions_configured": bool(os.environ.get("OPENSANCTIONS_API_KEY")),
+                "signed_proxy_configured": bool(os.environ.get("RFS_PUBLIC_URL")),
+                "storage_backend": get_storage(config.upload.temp_dir).name,
             },
         }
 

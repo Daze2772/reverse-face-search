@@ -172,6 +172,92 @@ def test_engine_rejects_missing_image_url():
     logger.info("✔ engine_rejects_missing_image_url PASS")
 
 
+# ─── Signed token round-trip ───────────────────────────────────────────────
+
+def test_signed_token_roundtrip():
+    import os
+    os.environ["RFS_IMG_TOKEN_SECRET"] = "test-secret-do-not-use"
+    from src.storage import make_token, verify_token
+
+    token = make_token("abc-123.jpg", ttl_seconds=60)
+    out = verify_token(token)
+    assert_true(out is not None, "fresh token should verify")
+    key, exp = out
+    assert_true(key == "abc-123.jpg", f"key mismatch: {key}")
+    assert_true(exp > 0, "expiry should be positive")
+
+    # Tamper detection
+    bad = token[:-2] + "ff"
+    assert_true(verify_token(bad) is None, "tampered token should be rejected")
+
+    # Garbage token
+    assert_true(verify_token("nope") is None, "garbage token rejected")
+    assert_true(verify_token("a.b.c") is None, "wrong-shape token rejected")
+    logger.info("✔ signed_token_roundtrip PASS")
+
+
+def test_signed_token_expiry():
+    import os, hmac, hashlib, base64, time
+    os.environ["RFS_IMG_TOKEN_SECRET"] = "test-secret-do-not-use"
+    from src.storage.signed_token import verify_token, _b64url_encode, _secret
+
+    # Build a token that has already expired (exp = 1 hour ago).
+    key = "expired.jpg"
+    key_part = _b64url_encode(key.encode("utf-8"))
+    exp = int(time.time() - 3600)
+    msg = f"{key_part}.{exp}".encode("utf-8")
+    sig = hmac.new(_secret(), msg, hashlib.sha256).hexdigest()[:32]
+    token = f"{key_part}.{exp}.{sig}"
+
+    assert_true(verify_token(token) is None, "expired token should be rejected")
+    logger.info("✔ signed_token_expiry PASS")
+
+
+# ─── Local storage backend ─────────────────────────────────────────────────
+
+def test_local_storage():
+    from src.storage import LocalStorage, reset_storage
+    with tempfile.TemporaryDirectory() as td:
+        s = LocalStorage(td)
+        s.save("test.jpg", b"hello world", content_type="image/jpeg")
+        assert_true(s.exists("test.jpg"), "saved file should exist")
+        assert_true(s.read("test.jpg") == b"hello world", "round-trip bytes")
+        s.delete("test.jpg")
+        assert_true(not s.exists("test.jpg"), "deleted file should be gone")
+
+        # Path traversal guard
+        s.save("../../../etc/passwd", b"nope")
+        # File must end up inside ``td`` regardless.
+        assert_true(not Path("/etc/passwd-rfs-test").exists(), "must not write outside root")
+    reset_storage()
+    logger.info("✔ local_storage PASS")
+
+
+# ─── og:image extraction (HTML parse only, no network) ───────────────────
+
+def test_og_image_extract():
+    from src.face.page_extractor import _find_image_in_head
+    html = """
+    <html><head>
+      <title>x</title>
+      <meta property="og:image" content="https://cdn.example.com/face.jpg">
+      <meta name="twitter:card" content="summary_large_image">
+    </head><body>...</body></html>
+    """
+    out = _find_image_in_head(html)
+    assert_true(out == "https://cdn.example.com/face.jpg", f"og:image extract failed: {out}")
+
+    # Twitter card fallback
+    html2 = '<head><meta name="twitter:image" content="//cdn.example.com/x.png"></head>'
+    out2 = _find_image_in_head(html2)
+    assert_true("cdn.example.com/x.png" in (out2 or ""), f"twitter:image extract failed: {out2}")
+
+    # No image
+    out3 = _find_image_in_head("<head><title>no meta</title></head>")
+    assert_true(out3 is None, "should return None when no image present")
+    logger.info("✔ og_image_extract PASS")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -183,6 +269,10 @@ def main():
         ("pdf_missing_wiki", test_pdf_missing_wiki, False),
         ("username_extraction", test_username_extraction, False),
         ("engine_rejects_missing_image_url", test_engine_rejects_missing_image_url, False),
+        ("signed_token_roundtrip", test_signed_token_roundtrip, False),
+        ("signed_token_expiry", test_signed_token_expiry, False),
+        ("local_storage", test_local_storage, False),
+        ("og_image_extract", test_og_image_extract, False),
     ]
     results = {}
     for name, fn, is_async in tests:

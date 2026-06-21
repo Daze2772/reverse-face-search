@@ -154,7 +154,11 @@
             }
         } else if (stage === 'clustering') {
             setStageActive('reverse_search', 'done');
+            setStageActive('face_filter', 'done');
             setStageActive('clustering', 'active');
+        } else if (stage === 'face_filter') {
+            setStageActive('reverse_search', 'done');
+            setStageActive('face_filter', 'active');
         } else if (stage === 'name_search') {
             setStageActive('clustering', 'done');
             setStageActive('name_search', 'active');

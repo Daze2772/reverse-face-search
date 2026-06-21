@@ -99,7 +99,7 @@ class SearchManager:
 
         # ── Stage 2: Reverse search (shared browser) ─────────────────────
         self._update_stage(search_id, "reverse_search", {"engines": []})
-        engine_results = await self._run_reverse_search(search_id, image_url)
+        engine_results = await self._run_reverse_search(search_id, image_url, image_path)
         pipeline_data["engine_results"] = engine_results
 
         engine_count = sum(1 for r in engine_results.values() if r.get("urls"))
@@ -212,7 +212,12 @@ class SearchManager:
 
     # ─── Internals ─────────────────────────────────────────────────────────
 
-    async def _run_reverse_search(self, search_id: str, image_url: str) -> Dict[str, Any]:
+    async def _run_reverse_search(
+        self,
+        search_id: str,
+        image_url: str,
+        image_path: str,
+    ) -> Dict[str, Any]:
         """Run all enabled engines in parallel using a single shared browser."""
         engines: Dict[str, Any] = {}
         if self.config.engines.yandex.enabled:
@@ -249,29 +254,129 @@ class SearchManager:
                 name, result = await task
                 results[name] = result
 
+            # ── Bot-detection fallback ────────────────────────────────
+            # If Google returned 0 results AND we used the signed proxy
+            # (our own domain — engines occasionally distrust unknown
+            # hosts), retry just Google with an imgbb URL.
+            if "google" in results and not results["google"].get("urls") \
+                    and "/api/img/" in (image_url or ""):
+                from .engines.filehost import upload_to_public
+                logger.info("[google] 0 results from signed proxy → retrying with imgbb")
+                external_url = await upload_to_public(image_path, prefer_external=True)
+                if external_url:
+                    retry = await engines["google"].search(
+                        "", image_url=external_url, browser=pool.browser,
+                    )
+                    retry_count = len(retry.get("urls", []))
+                    if retry_count > 0:
+                        logger.info(f"[google] imgbb retry succeeded: {retry_count} URLs")
+                        results["google"] = retry
+                        self._update_stage(
+                            search_id, "reverse_search",
+                            {"google_urls": retry_count, "google_fallback": "imgbb"},
+                        )
+
         # Optional: face-embedding filtering
         if self.config.face.enabled:
             try:
-                await self._face_filter(results)
+                self._update_stage(search_id, "face_filter")
+                await self._face_filter(image_path, results)
             except Exception as e:
                 logger.warning(f"face filter skipped: {e}")
 
         return results
 
-    async def _face_filter(self, engine_results: Dict[str, Any]) -> None:
+    async def _face_filter(self, image_path: str, engine_results: Dict[str, Any]) -> None:
         """Filter engine result URLs by InsightFace cosine similarity.
 
-        We only have URLs (no thumbnails) from the URL-based search — so this
-        helper looks for image-like result URLs (with image extensions) and
-        scores those. Pages without an image link are left unscored.
+        For each engine result URL we fetch the page, pull the og:image,
+        embed it, and compare against the reference. Results below the
+        configured similarity threshold are demoted (kept in the engine
+        list but flagged ``face_match=False``) rather than dropped — so
+        the downstream username extraction can still mine them, but the
+        intel report knows which URLs are noise vs signal.
+
+        Downside mitigation:
+          * Capped at ``max_images_per_engine`` URLs (default 10).
+          * og:image extraction is concurrent (8 in flight) and bounded.
+          * Embeddings discarded after scoring — no PII at rest.
         """
         from .face import FaceVerifier
+        from .face.page_extractor import extract_preview_images
 
-        # NOTE: this needs the reference image still on disk. The pipeline
-        # purges it at the very end, so we're safe to grab it from the engine
-        # result list's first entry — but in practice the search_manager
-        # owns ``image_path``. The verifier is therefore invoked from the
-        # outer pipeline (see below). Stub left here for future expansion.
+        cap = max(1, self.config.face.max_images_per_engine)
+        # Collect URLs to score across all engines.
+        urls_per_engine: Dict[str, List[str]] = {}
+        for engine_name, payload in engine_results.items():
+            url_objs = payload.get("urls", [])[:cap]
+            urls_per_engine[engine_name] = [u.get("url") for u in url_objs if u.get("url")]
+
+        all_urls = [u for urls in urls_per_engine.values() for u in urls]
+        if not all_urls:
+            return
+
+        logger.info(f"Face filter: extracting og:image for {len(all_urls)} pages")
+        pairs = await extract_preview_images(all_urls)
+        if not pairs:
+            logger.info("Face filter: no preview images extractable; skipping")
+            return
+
+        # url → image_url lookup
+        page_to_img = dict(pairs)
+        image_urls = [img for _, img in pairs]
+
+        verifier = self._get_face_verifier()
+        if verifier is None:
+            return
+        matches = await verifier.compare_against_reference(image_path, image_urls)
+        if not matches:
+            logger.info("Face filter: no embeddings produced; reference may lack a face")
+            return
+
+        # img_url → similarity
+        sim_by_img = {m.url: m.similarity for m in matches}
+        threshold = self.config.face.similarity_threshold
+
+        # Annotate engine results with face match info.
+        kept = dropped = 0
+        for engine_name, payload in engine_results.items():
+            for entry in payload.get("urls", []):
+                url = entry.get("url")
+                img = page_to_img.get(url)
+                if not img:
+                    entry["face_match"] = None  # unknown
+                    continue
+                sim = sim_by_img.get(img)
+                if sim is None:
+                    entry["face_match"] = None
+                    continue
+                entry["face_similarity"] = round(sim, 3)
+                entry["face_match"] = sim >= threshold
+                if entry["face_match"]:
+                    kept += 1
+                else:
+                    dropped += 1
+
+        logger.info(
+            f"Face filter: kept={kept} dropped={dropped} threshold={threshold}"
+        )
+
+    def _get_face_verifier(self):
+        if self._face_verifier is not None:
+            return self._face_verifier
+        try:
+            from .face import FaceVerifier
+            self._face_verifier = FaceVerifier(
+                model_name=self.config.face.model_name,
+                similarity_threshold=self.config.face.similarity_threshold,
+            )
+            return self._face_verifier
+        except Exception as e:
+            logger.warning(
+                f"Face verifier unavailable ({e}); install insightface + onnxruntime "
+                f"+ opencv-python-headless to enable"
+            )
+            return None
 
     async def _active_social_search(
         self,
